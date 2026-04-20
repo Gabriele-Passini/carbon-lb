@@ -1,0 +1,32 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: "loadbalancer"
+    static_configs:
+      - targets: ["loadbalancer:2112"]
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: "loadbalancer"
+
+  - job_name: "registry"
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["registry:9001"]
+
+  # Workers expose a /metrics endpoint via a small Prometheus middleware
+  - job_name: "workers"
+    static_configs:
+      - targets:
+          - "worker-it-1:2113"
+          - "worker-it-2:2113"
+          - "worker-fr-1:2113"
+          - "worker-de-1:2113"
+          - "worker-es-1:2113"
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "(.+):.*"
+        target_label: node_id
+        replacement: "${1}"

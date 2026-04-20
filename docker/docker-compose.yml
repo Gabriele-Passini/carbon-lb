@@ -1,0 +1,201 @@
+version: "3.9"
+
+networks:
+  carbonlb:
+    driver: bridge
+
+volumes:
+  prometheus_data: {}
+  grafana_data: {}
+
+services:
+
+  # ── Service Registry ────────────────────────────────────────────────────────
+  registry:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.registry
+    container_name: registry
+    networks: [carbonlb]
+    ports:
+      - "9000:9000"
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - CARBONLB_REGISTRY_ADDRESS=:9000
+      - CARBONLB_REGISTRY_NODE_TTL=30s
+    volumes:
+      - ../config:/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9000/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Load Balancer ───────────────────────────────────────────────────────────
+  loadbalancer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.lb
+    container_name: loadbalancer
+    networks: [carbonlb]
+    ports:
+      - "8080:8080"   # task proxy
+      - "2112:2112"   # Prometheus metrics
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - REGISTRY_URL=http://registry:9000
+      - CARBONLB_LOADBALANCER_ALGORITHM=carbon_aware
+      - CARBONLB_LOADBALANCER_CARBON_WEIGHT=0.5
+      - CARBONLB_LOADBALANCER_ENERGY_WEIGHT=0.3
+      - CARBONLB_LOADBALANCER_LOAD_WEIGHT=0.2
+      - CARBONLB_CARBON_PROVIDER=mock
+      - CARBONLB_CARBON_DEFAULT_INTENSITY=300.0
+    volumes:
+      - ../config:/config:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Workers — different regions simulate different carbon intensities ────────
+  worker-it-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: worker-it-1
+    networks: [carbonlb]
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - NODE_ID=worker-it-1
+      - NODE_REGION=IT
+      - LISTEN_ADDR=:8081
+      - NODE_ADDRESS=worker-it-1:8081
+      - REGISTRY_URL=http://registry:9000
+      - CARBONLB_WORKER_BASE_POWER_WATTS=60
+    volumes:
+      - ../config:/config:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-it-2:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: worker-it-2
+    networks: [carbonlb]
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - NODE_ID=worker-it-2
+      - NODE_REGION=IT
+      - LISTEN_ADDR=:8081
+      - NODE_ADDRESS=worker-it-2:8081
+      - REGISTRY_URL=http://registry:9000
+      - CARBONLB_WORKER_BASE_POWER_WATTS=55
+    volumes:
+      - ../config:/config:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-fr-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: worker-fr-1
+    networks: [carbonlb]
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - NODE_ID=worker-fr-1
+      - NODE_REGION=FR
+      - LISTEN_ADDR=:8081
+      - NODE_ADDRESS=worker-fr-1:8081
+      - REGISTRY_URL=http://registry:9000
+      - CARBONLB_WORKER_BASE_POWER_WATTS=50
+    volumes:
+      - ../config:/config:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-de-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: worker-de-1
+    networks: [carbonlb]
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - NODE_ID=worker-de-1
+      - NODE_REGION=DE
+      - LISTEN_ADDR=:8081
+      - NODE_ADDRESS=worker-de-1:8081
+      - REGISTRY_URL=http://registry:9000
+      - CARBONLB_WORKER_BASE_POWER_WATTS=70
+    volumes:
+      - ../config:/config:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-es-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    container_name: worker-es-1
+    networks: [carbonlb]
+    environment:
+      - CONFIG_PATH=/config/config.yaml
+      - NODE_ID=worker-es-1
+      - NODE_REGION=ES
+      - LISTEN_ADDR=:8081
+      - NODE_ADDRESS=worker-es-1:8081
+      - REGISTRY_URL=http://registry:9000
+      - CARBONLB_WORKER_BASE_POWER_WATTS=45
+    volumes:
+      - ../config:/config:ro
+    depends_on:
+      registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Prometheus ──────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    networks: [carbonlb]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  # ── Grafana ─────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    networks: [carbonlb]
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+    depends_on:
+      - prometheus
+    restart: unless-stopped

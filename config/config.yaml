@@ -1,0 +1,38 @@
+loadbalancer:
+  address: ":8080"
+  algorithm: "carbon_aware"   # carbon_aware | round_robin | least_connections
+  health_check_period: "10s"
+  stats_refresh_period: "5s"
+  # Weights for carbon-aware scoring (must sum to 1.0)
+  carbon_weight: 0.5          # weight for carbon intensity
+  energy_weight: 0.3          # weight for power consumption
+  load_weight: 0.2            # weight for CPU load
+
+registry:
+  address: ":9000"
+  node_ttl: "30s"
+  cleanup_period: "10s"
+
+worker:
+  id: "worker-1"
+  address: ":8081"
+  region: "IT"
+  registry_address: "http://registry:9000"
+  heartbeat_period: "5s"
+  simulate_power: true
+  base_power_watts: 50.0
+
+carbon:
+  provider: "mock"              # mock | electricity_maps
+  api_key: ""                   # set via CARBONLB_CARBON_API_KEY env var
+  base_url: "https://api.electricitymap.org/v3"
+  refresh_period: "60s"
+  default_intensity: 300.0      # gCO2/kWh fallback
+
+energy:
+  provider: "mock"              # mock | cadvisor
+  endpoint: "http://cadvisor:8080"
+
+metrics:
+  address: ":2112"
+  path: "/metrics"
