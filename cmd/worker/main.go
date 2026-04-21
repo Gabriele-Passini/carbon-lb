@@ -22,6 +22,13 @@ import (
 )
 
 var connCount int64
+var online int32 = 1 // 1 = online, 0 = fault-injected offline
+
+const (
+	faultInterval      = 20 * time.Second
+	failProbability    = 0.20
+	recoverProbability = 0.30
+)
 
 func main() {
 	log, _ := zap.NewProduction()
@@ -63,14 +70,25 @@ func main() {
 	}
 
 	go heartbeatLoop(ctx, registryAddr, nodeID, energyProv, cfg.Worker.HeartbeatPeriod, log)
+	go faultSimLoop(ctx, registryAddr, nodeID, advertiseAddr, region, log)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.LoadInt32(&online) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"status": "offline", "node_id": nodeID})
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "node_id": nodeID})
 	})
 
 	mux.HandleFunc("/task", func(w http.ResponseWriter, r *http.Request) {
+		if atomic.LoadInt32(&online) == 0 {
+			http.Error(w, "node offline", http.StatusServiceUnavailable)
+			return
+		}
 		atomic.AddInt64(&connCount, 1)
 		defer atomic.AddInt64(&connCount, -1)
 		start := time.Now()
@@ -154,6 +172,9 @@ func heartbeatLoop(ctx context.Context, registryAddr, id string, ep energy.Provi
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			if atomic.LoadInt32(&online) == 0 {
+				continue
+			}
 			watts, err := ep.PowerWatts(ctx)
 			if err != nil {
 				watts = 50.0
@@ -171,6 +192,32 @@ func heartbeatLoop(ctx context.Context, registryAddr, id string, ep energy.Provi
 				log.Warn("heartbeat failed", zap.Error(err))
 			} else {
 				resp.Body.Close()
+			}
+		}
+	}
+}
+
+func faultSimLoop(ctx context.Context, registryAddr, nodeID, advertiseAddr, region string, log *zap.Logger) {
+	ticker := time.NewTicker(faultInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if atomic.LoadInt32(&online) == 1 {
+				if rand.Float64() < failProbability {
+					atomic.StoreInt32(&online, 0)
+					deregister(registryAddr, nodeID, log)
+					log.Info("fault injected: node going offline", zap.String("id", nodeID))
+				}
+			} else {
+				if rand.Float64() < recoverProbability {
+					if err := registerWithRegistry(registryAddr, nodeID, advertiseAddr, region, log); err == nil {
+						atomic.StoreInt32(&online, 1)
+						log.Info("fault cleared: node back online", zap.String("id", nodeID))
+					}
+				}
 			}
 		}
 	}
