@@ -3,18 +3,18 @@ package balancer_test
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/carbon-lb/internal/balancer"
 	"github.com/carbon-lb/internal/config"
 	"github.com/carbon-lb/pkg/models"
-	"go.uber.org/zap"
 )
 
-// mockCarbonProvider always returns a fixed value per zone
 type mockCarbonProvider struct {
 	intensities map[string]float64
 }
@@ -27,17 +27,20 @@ func (m *mockCarbonProvider) Intensity(_ context.Context, zone string) (float64,
 }
 func (m *mockCarbonProvider) Start(_ context.Context) {}
 
+func testLog() *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+}
+
 func defaultCfg() config.LBConfig {
 	return config.LBConfig{
 		Algorithm:          "carbon_aware",
-		StatsRefreshPeriod: 5 * time.Second,
+		StatsRefreshPeriod: config.Duration(5 * time.Second),
 		CarbonWeight:       0.5,
 		EnergyWeight:       0.3,
 		LoadWeight:         0.2,
 	}
 }
 
-// startMockRegistry returns a test server that serves a fixed node list
 func startMockRegistry(nodes []nodeWithStats) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -74,26 +77,21 @@ func TestCarbonAwareSelectsGreenestNode(t *testing.T) {
 
 	carbonProv := &mockCarbonProvider{
 		intensities: map[string]float64{
-			"FR": 60,  // very low - nuclear heavy
-			"DE": 400, // high - coal heavy
-			"IT": 300, // medium
+			"FR": 60,
+			"DE": 400,
+			"IT": 300,
 		},
 	}
 
-	log, _ := zap.NewDevelopment()
-	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, log)
-
-	// Manually trigger refresh
+	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, testLog())
 	ctx := context.Background()
 	bal.Start(ctx)
-	time.Sleep(200 * time.Millisecond) // let refresh run
+	time.Sleep(200 * time.Millisecond)
 
 	selected, err := bal.SelectNode(models.AlgoCarbonAware)
 	if err != nil {
 		t.Fatalf("SelectNode failed: %v", err)
 	}
-
-	// FR has lowest carbon intensity (60 gCO2/kWh) → should be selected
 	if selected.Region != "FR" {
 		t.Errorf("expected FR node (lowest carbon), got region=%s node=%s", selected.Region, selected.ID)
 	}
@@ -105,8 +103,7 @@ func TestRoundRobinCyclesAllNodes(t *testing.T) {
 	defer srv.Close()
 
 	carbonProv := &mockCarbonProvider{}
-	log, _ := zap.NewDevelopment()
-	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, log)
+	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, testLog())
 	bal.Start(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
@@ -118,21 +115,18 @@ func TestRoundRobinCyclesAllNodes(t *testing.T) {
 		}
 		seen[n.ID] = true
 	}
-
-	// All 3 nodes should have been selected
 	if len(seen) != 3 {
 		t.Errorf("expected 3 distinct nodes visited, got %d: %v", len(seen), seen)
 	}
 }
 
 func TestLeastConnectionsSelectsIdleNode(t *testing.T) {
-	nodes := makeNodes() // worker-it-1 has ActiveConns=1 (lowest)
+	nodes := makeNodes()
 	srv := startMockRegistry(nodes)
 	defer srv.Close()
 
 	carbonProv := &mockCarbonProvider{}
-	log, _ := zap.NewDevelopment()
-	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, log)
+	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, testLog())
 	bal.Start(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
@@ -146,15 +140,13 @@ func TestLeastConnectionsSelectsIdleNode(t *testing.T) {
 }
 
 func TestNoHealthyNodesReturnsError(t *testing.T) {
-	// Registry returns empty list
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]nodeWithStats{})
 	}))
 	defer srv.Close()
 
 	carbonProv := &mockCarbonProvider{}
-	log, _ := zap.NewDevelopment()
-	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, log)
+	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, testLog())
 	bal.Start(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
@@ -165,7 +157,6 @@ func TestNoHealthyNodesReturnsError(t *testing.T) {
 }
 
 func TestCarbonScoreOrdering(t *testing.T) {
-	// Verify that a node with lower carbon+energy always wins over higher ones
 	nodes := []nodeWithStats{
 		{
 			NodeInfo: models.NodeInfo{ID: "dirty", Region: "DE", Healthy: true, Address: "x:1"},
@@ -182,8 +173,7 @@ func TestCarbonScoreOrdering(t *testing.T) {
 	carbonProv := &mockCarbonProvider{
 		intensities: map[string]float64{"DE": 500, "FR": 50},
 	}
-	log, _ := zap.NewDevelopment()
-	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, log)
+	bal := balancer.New(defaultCfg(), srv.URL, carbonProv, testLog())
 	bal.Start(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
@@ -197,10 +187,8 @@ func TestCarbonScoreOrdering(t *testing.T) {
 }
 
 func TestRegistryFailoverGraceful(t *testing.T) {
-	// Registry is unavailable from the start → balancer should not panic
 	carbonProv := &mockCarbonProvider{}
-	log, _ := zap.NewDevelopment()
-	bal := balancer.New(defaultCfg(), "http://localhost:19999", carbonProv, log)
+	bal := balancer.New(defaultCfg(), "http://localhost:19999", carbonProv, testLog())
 	bal.Start(context.Background())
 	time.Sleep(300 * time.Millisecond)
 
@@ -208,5 +196,4 @@ func TestRegistryFailoverGraceful(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when registry unreachable")
 	}
-	// Should not panic — test passes if we reach here
 }

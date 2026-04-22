@@ -1,0 +1,40 @@
+{
+  "loadbalancer": {
+    "address": ":8080",
+    "algorithm": "carbon_aware",
+    "health_check_period": "10s",
+    "stats_refresh_period": "5s",
+    "carbon_weight": 0.5,
+    "energy_weight": 0.3,
+    "load_weight": 0.2
+  },
+  "registry": {
+    "address": ":9000",
+    "node_ttl": "30s",
+    "cleanup_period": "10s"
+  },
+  "worker": {
+    "id": "worker-1",
+    "address": ":8081",
+    "region": "IT",
+    "registry_address": "http://registry:9000",
+    "heartbeat_period": "5s",
+    "simulate_power": true,
+    "base_power_watts": 50.0
+  },
+  "carbon": {
+    "provider": "mock",
+    "api_key": "",
+    "base_url": "https://api.electricitymap.org/v3",
+    "refresh_period": "60s",
+    "default_intensity": 300.0
+  },
+  "energy": {
+    "provider": "mock",
+    "endpoint": "http://cadvisor:8080"
+  },
+  "metrics": {
+    "address": ":2112",
+    "path": "/metrics"
+  }
+}

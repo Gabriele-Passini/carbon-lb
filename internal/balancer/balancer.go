@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"sync"
@@ -13,7 +14,6 @@ import (
 	"github.com/carbon-lb/internal/carbon"
 	"github.com/carbon-lb/internal/config"
 	"github.com/carbon-lb/pkg/models"
-	"go.uber.org/zap"
 )
 
 // NodeState is the balancer's view of a worker node
@@ -31,11 +31,11 @@ type Balancer struct {
 	cfg         config.LBConfig
 	carbonProv  carbon.Provider
 	registryURL string
-	log         *zap.Logger
+	log         *slog.Logger
 	client      *http.Client
 }
 
-func New(cfg config.LBConfig, registryURL string, carbonProv carbon.Provider, log *zap.Logger) *Balancer {
+func New(cfg config.LBConfig, registryURL string, carbonProv carbon.Provider, log *slog.Logger) *Balancer {
 	return &Balancer{
 		cfg:         cfg,
 		carbonProv:  carbonProv,
@@ -51,9 +51,8 @@ func (b *Balancer) Start(ctx context.Context) {
 }
 
 func (b *Balancer) refreshLoop(ctx context.Context) {
-	ticker := time.NewTicker(b.cfg.StatsRefreshPeriod)
+	ticker := time.NewTicker(time.Duration(b.cfg.StatsRefreshPeriod))
 	defer ticker.Stop()
-	// initial fetch
 	b.refreshNodes(ctx)
 	for {
 		select {
@@ -70,12 +69,12 @@ func (b *Balancer) refreshNodes(ctx context.Context) {
 	url := fmt.Sprintf("%s/nodes", b.registryURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		b.log.Error("registry request build failed", zap.Error(err))
+		b.log.Error("registry request build failed", "error", err)
 		return
 	}
 	resp, err := b.client.Do(req)
 	if err != nil {
-		b.log.Error("registry unreachable", zap.Error(err))
+		b.log.Error("registry unreachable", "error", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -86,11 +85,10 @@ func (b *Balancer) refreshNodes(ctx context.Context) {
 	}
 	var raw []nodeWithStats
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		b.log.Error("registry decode failed", zap.Error(err))
+		b.log.Error("registry decode failed", "error", err)
 		return
 	}
 
-	// Fetch carbon intensity for each region
 	states := make([]*NodeState, 0, len(raw))
 	for _, n := range raw {
 		if !n.Healthy {
@@ -98,7 +96,7 @@ func (b *Balancer) refreshNodes(ctx context.Context) {
 		}
 		ci, err := b.carbonProv.Intensity(ctx, n.Region)
 		if err != nil {
-			b.log.Warn("carbon fetch failed", zap.String("region", n.Region), zap.Error(err))
+			b.log.Warn("carbon fetch failed", "region", n.Region, "error", err)
 			ci = 300
 		}
 		n.Stats.CarbonIntensity = ci
@@ -109,15 +107,15 @@ func (b *Balancer) refreshNodes(ctx context.Context) {
 	b.mu.Lock()
 	b.nodes = states
 	b.mu.Unlock()
-	b.log.Debug("nodes refreshed", zap.Int("count", len(states)))
+	b.log.Debug("nodes refreshed", "count", len(states))
 }
 
 // computeScore calculates a composite environmental score.
 // Lower score = better choice.
 // Score = w_c*(CI/CI_max) + w_e*(W/W_max) + w_l*(load/100)
 func (b *Balancer) computeScore(s models.NodeStats, ci float64) float64 {
-	const ciMax = 600.0 // gCO2/kWh reference maximum
-	const wMax = 200.0  // Watts reference maximum
+	const ciMax = 600.0
+	const wMax = 200.0
 
 	carbonNorm := math.Min(ci/ciMax, 1.0)
 	energyNorm := math.Min(s.EnergyWatts/wMax, 1.0)
@@ -148,7 +146,6 @@ func (b *Balancer) SelectNode(algo models.AlgorithmType) (*NodeState, error) {
 	}
 }
 
-// selectCarbonAware picks the node with the lowest composite score
 func (b *Balancer) selectCarbonAware(nodes []*NodeState) (*NodeState, error) {
 	best := nodes[0]
 	for _, n := range nodes[1:] {
@@ -159,13 +156,11 @@ func (b *Balancer) selectCarbonAware(nodes []*NodeState) (*NodeState, error) {
 	return best, nil
 }
 
-// selectRoundRobin cycles through nodes in order
 func (b *Balancer) selectRoundRobin(nodes []*NodeState) (*NodeState, error) {
 	idx := b.rrIndex.Add(1) - 1
 	return nodes[int(idx)%len(nodes)], nil
 }
 
-// selectLeastConnections picks the node with fewest active connections
 func (b *Balancer) selectLeastConnections(nodes []*NodeState) (*NodeState, error) {
 	best := nodes[0]
 	for _, n := range nodes[1:] {
@@ -174,6 +169,32 @@ func (b *Balancer) selectLeastConnections(nodes []*NodeState) (*NodeState, error
 		}
 	}
 	return best, nil
+}
+
+// SelectNodeExcluding selects a node using the given algorithm, skipping any node whose ID is in exclude.
+func (b *Balancer) SelectNodeExcluding(algo models.AlgorithmType, exclude map[string]struct{}) (*NodeState, error) {
+	b.mu.RLock()
+	all := b.nodes
+	b.mu.RUnlock()
+
+	filtered := make([]*NodeState, 0, len(all))
+	for _, n := range all {
+		if _, skip := exclude[n.ID]; !skip {
+			filtered = append(filtered, n)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, fmt.Errorf("no healthy nodes available")
+	}
+
+	switch algo {
+	case models.AlgoCarbonAware:
+		return b.selectCarbonAware(filtered)
+	case models.AlgoLeastConn:
+		return b.selectLeastConnections(filtered)
+	default:
+		return b.selectRoundRobin(filtered)
+	}
 }
 
 // Nodes returns a snapshot of current node states (for metrics/dashboard)

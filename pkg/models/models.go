@@ -26,17 +26,19 @@ type NodeStats struct {
 // Task represents a computation task to be distributed
 type Task struct {
 	ID      string            `json:"id"`
+	Type    string            `json:"type,omitempty"` // "cpu" | "memory" (default: "cpu")
 	Payload string            `json:"payload"`
 	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // TaskResult is the response from a worker
 type TaskResult struct {
-	TaskID    string        `json:"task_id"`
-	NodeID    string        `json:"node_id"`
-	Result    string        `json:"result"`
-	Duration  time.Duration `json:"duration_ms"`
-	Algorithm string        `json:"algorithm"` // "carbon_aware" | "round_robin"
+	TaskID       string        `json:"task_id"`
+	NodeID       string        `json:"node_id"`
+	Result       string        `json:"result"`
+	Duration     time.Duration `json:"duration_ms"`
+	Algorithm    string        `json:"algorithm"`              // "carbon_aware" | "round_robin"
+	CounterValue *int64        `json:"counter_value,omitempty"` // set for memory tasks
 }
 
 // RegisterRequest is sent by a worker to join the cluster

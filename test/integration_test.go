@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -18,19 +20,18 @@ import (
 	"github.com/carbon-lb/internal/config"
 	"github.com/carbon-lb/internal/registry"
 	"github.com/carbon-lb/pkg/models"
-	"go.uber.org/zap"
 )
 
-// ── helpers ───────────────────────────────────────────────────────────────────
-
-func testLog() *zap.Logger {
-	l, _ := zap.NewDevelopment()
-	return l
+func testLog() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
 func startRegistry(t *testing.T) (*registry.Registry, *httptest.Server) {
 	t.Helper()
-	cfg := config.RegistryConfig{NodeTTL: 30 * time.Second, CleanupPeriod: 5 * time.Second}
+	cfg := config.RegistryConfig{
+		NodeTTL:       config.Duration(30 * time.Second),
+		CleanupPeriod: config.Duration(5 * time.Second),
+	}
 	reg := registry.New(cfg, testLog())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", reg.RegisterHandler)
@@ -47,7 +48,7 @@ type workerSim struct {
 	region          string
 	server          *httptest.Server
 	requestCount    atomic.Int64
-	carbonIntensity float64 // gCO2/kWh for this region
+	carbonIntensity float64
 	powerWatts      float64
 }
 
@@ -79,7 +80,6 @@ func registerWorker(t *testing.T, registryURL string, ws *workerSim) {
 	}
 	resp.Body.Close()
 
-	// Send initial heartbeat with energy data
 	hb := models.HeartbeatRequest{
 		NodeID:      ws.id,
 		CPUUsage:    20,
@@ -105,17 +105,14 @@ func (m *mockCarbonProv) Intensity(_ context.Context, zone string) (float64, err
 }
 func (m *mockCarbonProv) Start(_ context.Context) {}
 
-// ── integration test ──────────────────────────────────────────────────────────
-
 func TestIntegration_CarbonAwareVsRoundRobin(t *testing.T) {
 	_, regSrv := startRegistry(t)
 
-	// Create 4 workers with different carbon intensities
 	workers := []*workerSim{
-		startWorker(t, "worker-fr", "FR", 60, 40),  // very green: nuclear France
-		startWorker(t, "worker-de", "DE", 400, 80), // dirty: coal Germany
-		startWorker(t, "worker-it", "IT", 300, 60), // medium: Italy
-		startWorker(t, "worker-es", "ES", 200, 50), // good: Spain (solar)
+		startWorker(t, "worker-fr", "FR", 60, 40),
+		startWorker(t, "worker-de", "DE", 400, 80),
+		startWorker(t, "worker-it", "IT", 300, 60),
+		startWorker(t, "worker-es", "ES", 200, 50),
 	}
 
 	for _, ws := range workers {
@@ -129,28 +126,23 @@ func TestIntegration_CarbonAwareVsRoundRobin(t *testing.T) {
 	}
 
 	lbCfg := config.LBConfig{
-		StatsRefreshPeriod: 1 * time.Second,
+		StatsRefreshPeriod: config.Duration(1 * time.Second),
 		CarbonWeight:       0.5, EnergyWeight: 0.3, LoadWeight: 0.2,
 	}
-	log := testLog()
 
-	// Run carbon_aware balancer
-	balCA := balancer.New(lbCfg, regSrv.URL, carbonProv, log)
+	balCA := balancer.New(lbCfg, regSrv.URL, carbonProv, testLog())
 	balCA.Start(context.Background())
 	time.Sleep(300 * time.Millisecond)
 
-	// Run round_robin balancer
 	balRR := balancer.New(lbCfg, regSrv.URL, carbon.NewProvider(
-		config.CarbonConfig{Provider: "mock", DefaultIntensity: 300, RefreshPeriod: 60 * time.Second},
-		log,
-	), log)
+		config.CarbonConfig{Provider: "mock", DefaultIntensity: 300, RefreshPeriod: config.Duration(60 * time.Second)},
+		testLog(),
+	), testLog())
 	balRR.Start(context.Background())
 	time.Sleep(300 * time.Millisecond)
 
 	const totalRequests = 100
-	const workers4 = 4
 
-	// ── carbon_aware run ──
 	var caCarbon float64
 	for i := 0; i < totalRequests; i++ {
 		n, err := balCA.SelectNode(models.AlgoCarbonAware)
@@ -161,14 +153,12 @@ func TestIntegration_CarbonAwareVsRoundRobin(t *testing.T) {
 	}
 	caAvg := caCarbon / float64(totalRequests)
 
-	// ── round_robin run ──
 	var rrCarbon float64
 	for i := 0; i < totalRequests; i++ {
 		n, err := balRR.SelectNode(models.AlgoRoundRobin)
 		if err != nil {
 			t.Fatalf("RR select failed: %v", err)
 		}
-		// assign carbon intensity by region to fair comparison
 		ci := carbonProv.intensities[n.Region]
 		rrCarbon += ci
 	}
@@ -182,8 +172,6 @@ func TestIntegration_CarbonAwareVsRoundRobin(t *testing.T) {
 		t.Errorf("expected carbon_aware (%.1f) < round_robin (%.1f)", caAvg, rrAvg)
 	}
 }
-
-// ── concurrent load test ──────────────────────────────────────────────────────
 
 func TestConcurrentRequests(t *testing.T) {
 	_, regSrv := startRegistry(t)
@@ -199,7 +187,7 @@ func TestConcurrentRequests(t *testing.T) {
 
 	carbonProv := &mockCarbonProv{intensities: map[string]float64{"FR": 60, "IT": 300, "DE": 400}}
 	lbCfg := config.LBConfig{
-		StatsRefreshPeriod: 1 * time.Second,
+		StatsRefreshPeriod: config.Duration(1 * time.Second),
 		CarbonWeight:       0.5, EnergyWeight: 0.3, LoadWeight: 0.2,
 	}
 	bal := balancer.New(lbCfg, regSrv.URL, carbonProv, testLog())
@@ -232,22 +220,16 @@ func TestConcurrentRequests(t *testing.T) {
 	}
 }
 
-// ── benchmark ─────────────────────────────────────────────────────────────────
-
-// BenchmarkCarbonAware measures selection throughput for the carbon-aware algorithm
 func BenchmarkCarbonAware(b *testing.B) {
 	_, regSrv := benchRegistry(b)
-
-	for _, ws := range benchWorkers(b, regSrv.URL) {
-		_ = ws
-	}
+	benchWorkers(b, regSrv.URL)
 
 	carbonProv := &mockCarbonProv{intensities: map[string]float64{"FR": 60, "DE": 400, "IT": 300, "ES": 200}}
 	lbCfg := config.LBConfig{
-		StatsRefreshPeriod: 1 * time.Second,
+		StatsRefreshPeriod: config.Duration(1 * time.Second),
 		CarbonWeight:       0.5, EnergyWeight: 0.3, LoadWeight: 0.2,
 	}
-	bal := balancer.New(lbCfg, regSrv.URL, carbonProv, zap.NewNop())
+	bal := balancer.New(lbCfg, regSrv.URL, carbonProv, testLog())
 	bal.Start(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
@@ -264,13 +246,13 @@ func BenchmarkRoundRobin(b *testing.B) {
 	benchWorkers(b, regSrv.URL)
 
 	lbCfg := config.LBConfig{
-		StatsRefreshPeriod: 1 * time.Second,
+		StatsRefreshPeriod: config.Duration(1 * time.Second),
 		CarbonWeight:       0.5, EnergyWeight: 0.3, LoadWeight: 0.2,
 	}
 	bal := balancer.New(lbCfg, regSrv.URL, carbon.NewProvider(
-		config.CarbonConfig{Provider: "mock", DefaultIntensity: 300, RefreshPeriod: 60 * time.Second},
-		zap.NewNop(),
-	), zap.NewNop())
+		config.CarbonConfig{Provider: "mock", DefaultIntensity: 300, RefreshPeriod: config.Duration(60 * time.Second)},
+		testLog(),
+	), testLog())
 	bal.Start(context.Background())
 	time.Sleep(200 * time.Millisecond)
 
@@ -284,8 +266,11 @@ func BenchmarkRoundRobin(b *testing.B) {
 
 func benchRegistry(b *testing.B) (*registry.Registry, *httptest.Server) {
 	b.Helper()
-	cfg := config.RegistryConfig{NodeTTL: 30 * time.Second, CleanupPeriod: 5 * time.Second}
-	reg := registry.New(cfg, zap.NewNop())
+	cfg := config.RegistryConfig{
+		NodeTTL:       config.Duration(30 * time.Second),
+		CleanupPeriod: config.Duration(5 * time.Second),
+	}
+	reg := registry.New(cfg, testLog())
 	mux := http.NewServeMux()
 	mux.HandleFunc("/register", reg.RegisterHandler)
 	mux.HandleFunc("/heartbeat", reg.HeartbeatHandler)
@@ -339,9 +324,6 @@ func startWorkerB(b *testing.B, id, region string, ci, watts float64) *workerSim
 	return ws
 }
 
-// ── statistical comparison helper ────────────────────────────────────────────
-
-// CarbonReductionPercent returns the % improvement of carbon_aware vs round_robin
 func CarbonReductionPercent(caIntensities, rrIntensities []float64) float64 {
 	if len(caIntensities) == 0 || len(rrIntensities) == 0 {
 		return 0
@@ -376,7 +358,6 @@ func stdDev(values []float64) float64 {
 }
 
 func TestCarbonReductionIsStatisticallySignificant(t *testing.T) {
-	// Deterministic simulation: CA always picks lowest CI node, RR cycles
 	regions := []struct {
 		region string
 		ci     float64
@@ -388,11 +369,9 @@ func TestCarbonReductionIsStatisticallySignificant(t *testing.T) {
 	caCI := make([]float64, n)
 	rrCI := make([]float64, n)
 
-	// CA: always picks FR (lowest carbon)
 	for i := range caCI {
-		caCI[i] = regions[0].ci // FR
+		caCI[i] = regions[0].ci
 	}
-	// RR: cycles through all regions
 	for i := range rrCI {
 		rrCI[i] = regions[i%len(regions)].ci
 	}
@@ -401,11 +380,9 @@ func TestCarbonReductionIsStatisticallySignificant(t *testing.T) {
 	t.Logf("Simulated carbon reduction: %.1f%%", reduction)
 	t.Logf("CA stddev: %.1f, RR stddev: %.1f", stdDev(caCI), stdDev(rrCI))
 
-	// CA should achieve at least 50% reduction vs RR in this deterministic scenario
 	if reduction < 50 {
 		t.Errorf("expected >=50%% carbon reduction, got %.1f%%", reduction)
 	}
 }
 
-// Ensure the carbon provider is accessible for benchmark tests
 var _ = fmt.Sprintf

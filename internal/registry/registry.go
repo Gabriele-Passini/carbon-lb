@@ -2,13 +2,13 @@ package registry
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/carbon-lb/internal/config"
 	"github.com/carbon-lb/pkg/models"
-	"go.uber.org/zap"
 )
 
 // Registry maintains the live set of worker nodes
@@ -16,7 +16,7 @@ type Registry struct {
 	mu    sync.RWMutex
 	nodes map[string]*nodeRecord
 	cfg   config.RegistryConfig
-	log   *zap.Logger
+	log   *slog.Logger
 }
 
 type nodeRecord struct {
@@ -25,7 +25,7 @@ type nodeRecord struct {
 	expiresAt time.Time
 }
 
-func New(cfg config.RegistryConfig, log *zap.Logger) *Registry {
+func New(cfg config.RegistryConfig, log *slog.Logger) *Registry {
 	r := &Registry{
 		nodes: make(map[string]*nodeRecord),
 		cfg:   cfg,
@@ -56,11 +56,11 @@ func (r *Registry) RegisterHandler(w http.ResponseWriter, req *http.Request) {
 			Healthy:  true,
 			LastSeen: time.Now(),
 		},
-		expiresAt: time.Now().Add(r.cfg.NodeTTL),
+		expiresAt: time.Now().Add(time.Duration(r.cfg.NodeTTL)),
 	}
 	r.mu.Unlock()
 
-	r.log.Info("node registered", zap.String("id", rr.NodeID), zap.String("addr", rr.Address), zap.String("region", rr.Region))
+	r.log.Info("node registered", "id", rr.NodeID, "addr", rr.Address, "region", rr.Region)
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "registered"})
 }
@@ -83,7 +83,7 @@ func (r *Registry) HeartbeatHandler(w http.ResponseWriter, req *http.Request) {
 	if rec, ok := r.nodes[hb.NodeID]; ok {
 		rec.info.Healthy = true
 		rec.info.LastSeen = time.Now()
-		rec.expiresAt = time.Now().Add(r.cfg.NodeTTL)
+		rec.expiresAt = time.Now().Add(time.Duration(r.cfg.NodeTTL))
 		rec.stats = models.NodeStats{
 			NodeID:      hb.NodeID,
 			CPUUsage:    hb.CPUUsage,
@@ -115,7 +115,7 @@ func (r *Registry) NodesHandler(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(result)
 }
 
-// DeregisterHandler handles DELETE /nodes/{id}
+// DeregisterHandler handles DELETE /deregister
 func (r *Registry) DeregisterHandler(w http.ResponseWriter, req *http.Request) {
 	id := req.URL.Query().Get("id")
 	if id == "" {
@@ -125,7 +125,7 @@ func (r *Registry) DeregisterHandler(w http.ResponseWriter, req *http.Request) {
 	r.mu.Lock()
 	delete(r.nodes, id)
 	r.mu.Unlock()
-	r.log.Info("node deregistered", zap.String("id", id))
+	r.log.Info("node deregistered", "id", id)
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -140,13 +140,13 @@ func (r *Registry) HealthHandler(w http.ResponseWriter, req *http.Request) {
 
 // cleanup removes expired nodes periodically
 func (r *Registry) cleanup() {
-	ticker := time.NewTicker(r.cfg.CleanupPeriod)
+	ticker := time.NewTicker(time.Duration(r.cfg.CleanupPeriod))
 	defer ticker.Stop()
 	for range ticker.C {
 		r.mu.Lock()
 		for id, rec := range r.nodes {
 			if time.Now().After(rec.expiresAt) {
-				r.log.Warn("node expired", zap.String("id", id))
+				r.log.Warn("node expired", "id", id)
 				delete(r.nodes, id)
 			}
 		}

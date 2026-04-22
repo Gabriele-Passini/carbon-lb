@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -10,17 +11,16 @@ import (
 
 	"github.com/carbon-lb/internal/config"
 	"github.com/carbon-lb/internal/registry"
-	"go.uber.org/zap"
 )
 
 func main() {
-	log, _ := zap.NewProduction()
-	defer log.Sync()
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	cfgPath := os.Getenv("CONFIG_PATH")
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
-		log.Fatal("config load failed", zap.Error(err))
+		log.Error("config load failed", "error", err)
+		os.Exit(1)
 	}
 
 	reg := registry.New(cfg.Registry, log)
@@ -38,9 +38,10 @@ func main() {
 	}
 
 	go func() {
-		log.Info("registry starting", zap.String("addr", cfg.Registry.Address))
+		log.Info("registry starting", "addr", cfg.Registry.Address)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatal("registry error", zap.Error(err))
+			log.Error("registry error", "error", err)
+			os.Exit(1)
 		}
 	}()
 

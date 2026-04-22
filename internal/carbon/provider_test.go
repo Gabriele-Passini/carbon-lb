@@ -2,28 +2,31 @@ package carbon_test
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/carbon-lb/internal/carbon"
 	"github.com/carbon-lb/internal/config"
-	"go.uber.org/zap"
 )
+
+func testLog() *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+}
 
 func defaultCarbonCfg() config.CarbonConfig {
 	return config.CarbonConfig{
 		Provider:         "mock",
-		RefreshPeriod:    60 * time.Second,
+		RefreshPeriod:    config.Duration(60 * time.Second),
 		DefaultIntensity: 300.0,
 	}
 }
 
 func TestMockProviderReturnsPositiveValue(t *testing.T) {
-	cfg := defaultCarbonCfg()
-	log, _ := zap.NewDevelopment()
-	prov := carbon.NewProvider(cfg, log)
+	prov := carbon.NewProvider(defaultCarbonCfg(), testLog())
 
 	val, err := prov.Intensity(context.Background(), "IT")
 	if err != nil {
@@ -35,13 +38,9 @@ func TestMockProviderReturnsPositiveValue(t *testing.T) {
 }
 
 func TestMockProviderRegionalDifferences(t *testing.T) {
-	// France (nuclear) should consistently be lower than Germany (coal-heavy)
-	cfg := defaultCarbonCfg()
-	log, _ := zap.NewDevelopment()
-	prov := carbon.NewProvider(cfg, log)
+	prov := carbon.NewProvider(defaultCarbonCfg(), testLog())
 	ctx := context.Background()
 
-	// Sample multiple times to account for noise
 	frSum, deSum := 0.0, 0.0
 	samples := 20
 	for i := 0; i < samples; i++ {
@@ -53,7 +52,6 @@ func TestMockProviderRegionalDifferences(t *testing.T) {
 	frAvg := frSum / float64(samples)
 	deAvg := deSum / float64(samples)
 
-	// FR (nuclear ~60) should be much lower than DE (~350)
 	if frAvg >= deAvg {
 		t.Errorf("expected FR avg (%.1f) < DE avg (%.1f)", frAvg, deAvg)
 	}
@@ -61,16 +59,14 @@ func TestMockProviderRegionalDifferences(t *testing.T) {
 
 func TestCacheReturnsCachedValue(t *testing.T) {
 	cfg := defaultCarbonCfg()
-	cfg.RefreshPeriod = 10 * time.Second // long TTL
-	log, _ := zap.NewDevelopment()
-	prov := carbon.NewProvider(cfg, log)
+	cfg.RefreshPeriod = config.Duration(10 * time.Second)
+	prov := carbon.NewProvider(cfg, testLog())
 	ctx := context.Background()
 
 	v1, err := prov.Intensity(ctx, "IT")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Second call should return cached value (same)
 	v2, err := prov.Intensity(ctx, "IT")
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +77,6 @@ func TestCacheReturnsCachedValue(t *testing.T) {
 }
 
 func TestElectricityMapsAPIIntegration(t *testing.T) {
-	// Test against a mock HTTP server that mimics the Electricity Maps API
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("auth-token") == "" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -96,11 +91,10 @@ func TestElectricityMapsAPIIntegration(t *testing.T) {
 		Provider:         "electricity_maps",
 		APIKey:           "test-key",
 		BaseURL:          srv.URL,
-		RefreshPeriod:    60 * time.Second,
+		RefreshPeriod:    config.Duration(60 * time.Second),
 		DefaultIntensity: 300.0,
 	}
-	log, _ := zap.NewDevelopment()
-	prov := carbon.NewProvider(cfg, log)
+	prov := carbon.NewProvider(cfg, testLog())
 
 	val, err := prov.Intensity(context.Background(), "IT")
 	if err != nil {
@@ -112,7 +106,6 @@ func TestElectricityMapsAPIIntegration(t *testing.T) {
 }
 
 func TestElectricityMapsAPIFallsBackOnError(t *testing.T) {
-	// Server returns 500 → provider should fall back to default intensity
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 	}))
@@ -122,11 +115,10 @@ func TestElectricityMapsAPIFallsBackOnError(t *testing.T) {
 		Provider:         "electricity_maps",
 		APIKey:           "key",
 		BaseURL:          srv.URL,
-		RefreshPeriod:    60 * time.Second,
+		RefreshPeriod:    config.Duration(60 * time.Second),
 		DefaultIntensity: 999.0,
 	}
-	log, _ := zap.NewDevelopment()
-	prov := carbon.NewProvider(cfg, log)
+	prov := carbon.NewProvider(cfg, testLog())
 
 	val, _ := prov.Intensity(context.Background(), "IT")
 	if val != 999.0 {
@@ -137,14 +129,12 @@ func TestElectricityMapsAPIFallsBackOnError(t *testing.T) {
 func TestUnknownZoneUsesDefault(t *testing.T) {
 	cfg := defaultCarbonCfg()
 	cfg.DefaultIntensity = 400.0
-	log, _ := zap.NewDevelopment()
-	prov := carbon.NewProvider(cfg, log)
+	prov := carbon.NewProvider(cfg, testLog())
 
 	val, err := prov.Intensity(context.Background(), "ZZ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Unknown zone → base = default ≈ 400, ±20% variation → between 320 and 480
 	if val < 200 || val > 600 {
 		t.Errorf("unexpected value for unknown zone: %f", val)
 	}

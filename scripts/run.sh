@@ -4,6 +4,7 @@ set -euo pipefail
 
 COMPOSE_INFRA="docker/docker-compose.yml"
 COMPOSE_WORKERS="docker/docker-compose.workers.yml"
+WORKERS_COUNT_FILE=".workers_count"
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; RED='\033[0;31m'; NC='\033[0m'
 
 log()  { echo -e "${CYAN}[INFO]${NC}  $*"; }
@@ -32,7 +33,9 @@ generate_workers() {
       local idx=$(( (i - 1) % pool ))
       local region="${_REGIONS[$idx]}"
       local power="${_POWERS[$idx]}"
-      local name="worker-$(echo "$region" | tr '[:upper:]' '[:lower:]' | tr '-' '')-$i"
+      local region_slug
+      region_slug=$(echo "$region" | tr '[:upper:]' '[:lower:]' | tr -d '-')
+      local name="worker-${region_slug}-$i"
       cat <<EOF
 
   $name:
@@ -42,17 +45,20 @@ generate_workers() {
     container_name: $name
     networks: [carbonlb]
     environment:
-      - CONFIG_PATH=/config/config.yaml
+      - CONFIG_PATH=/config/config.json
       - NODE_ID=$name
       - NODE_REGION=$region
       - LISTEN_ADDR=:8081
       - NODE_ADDRESS=$name:8081
       - REGISTRY_URL=http://registry:9000
+      - STATE_URL=http://stateserver:9001
       - CARBONLB_WORKER_BASE_POWER_WATTS=$power
     volumes:
       - ../config:/config:ro
     depends_on:
       registry:
+        condition: service_healthy
+      stateserver:
         condition: service_healthy
     restart: unless-stopped
 EOF
@@ -79,6 +85,7 @@ usage() {
 cmd_up() {
   local n="${1:-5}"
   generate_workers "$n"
+  echo "$n" > "$WORKERS_COUNT_FILE"
   log "Building and starting stack with $n worker(s)..."
   compose up -d --build
   log "Waiting for services to be ready..."
@@ -144,6 +151,13 @@ cmd_switch() {
 
 cmd_scale() {
   local count="${1:-3}"
+  if [[ -f "$WORKERS_COUNT_FILE" ]]; then
+    local max
+    max=$(cat "$WORKERS_COUNT_FILE")
+    if [ "$count" -gt "$max" ]; then
+      err "Cannot scale to $count: startup limit is $max worker(s)."
+    fi
+  fi
   log "Scaling workers to $count..."
   generate_workers "$count"
   compose up -d --build --remove-orphans

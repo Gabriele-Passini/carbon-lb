@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"math/rand"
 	"net/http"
@@ -11,7 +12,6 @@ import (
 	"time"
 
 	"github.com/carbon-lb/internal/config"
-	"go.uber.org/zap"
 )
 
 // Provider fetches carbon intensity data per region
@@ -24,7 +24,7 @@ type Cache struct {
 	mu     sync.RWMutex
 	data   map[string]cacheEntry
 	cfg    config.CarbonConfig
-	log    *zap.Logger
+	log    *slog.Logger
 	client *http.Client
 }
 
@@ -33,7 +33,7 @@ type cacheEntry struct {
 	fetchedAt time.Time
 }
 
-func NewProvider(cfg config.CarbonConfig, log *zap.Logger) Provider {
+func NewProvider(cfg config.CarbonConfig, log *slog.Logger) Provider {
 	return &Cache{
 		data:   make(map[string]cacheEntry),
 		cfg:    cfg,
@@ -44,7 +44,7 @@ func NewProvider(cfg config.CarbonConfig, log *zap.Logger) Provider {
 
 func (c *Cache) Start(ctx context.Context) {
 	go func() {
-		ticker := time.NewTicker(c.cfg.RefreshPeriod)
+		ticker := time.NewTicker(time.Duration(c.cfg.RefreshPeriod))
 		defer ticker.Stop()
 		for {
 			select {
@@ -59,7 +59,7 @@ func (c *Cache) Start(ctx context.Context) {
 				c.mu.RUnlock()
 				for _, z := range zones {
 					if _, err := c.fetchAndCache(ctx, z); err != nil {
-						c.log.Warn("carbon refresh failed", zap.String("zone", z), zap.Error(err))
+						c.log.Warn("carbon refresh failed", "zone", z, "error", err)
 					}
 				}
 			}
@@ -69,7 +69,7 @@ func (c *Cache) Start(ctx context.Context) {
 
 func (c *Cache) Intensity(ctx context.Context, zone string) (float64, error) {
 	c.mu.RLock()
-	if e, ok := c.data[zone]; ok && time.Since(e.fetchedAt) < c.cfg.RefreshPeriod {
+	if e, ok := c.data[zone]; ok && time.Since(e.fetchedAt) < time.Duration(c.cfg.RefreshPeriod) {
 		c.mu.RUnlock()
 		return e.value, nil
 	}
@@ -89,7 +89,7 @@ func (c *Cache) fetchAndCache(ctx context.Context, zone string) (float64, error)
 	}
 
 	if err != nil {
-		c.log.Warn("using default intensity", zap.String("zone", zone), zap.Error(err))
+		c.log.Warn("using default intensity", "zone", zone, "error", err)
 		val = c.cfg.DefaultIntensity
 	}
 

@@ -3,24 +3,28 @@ package registry_test
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/carbon-lb/internal/config"
 	"github.com/carbon-lb/internal/registry"
 	"github.com/carbon-lb/pkg/models"
-	"go.uber.org/zap"
 )
+
+func testLog() *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, nil))
+}
 
 func newTestRegistry() *registry.Registry {
 	cfg := config.RegistryConfig{
-		NodeTTL:       10 * time.Second,
-		CleanupPeriod: 1 * time.Second,
+		NodeTTL:       config.Duration(10 * time.Second),
+		CleanupPeriod: config.Duration(1 * time.Second),
 	}
-	log, _ := zap.NewDevelopment()
-	return registry.New(cfg, log)
+	return registry.New(cfg, testLog())
 }
 
 func doPost(t *testing.T, handler http.HandlerFunc, path string, body interface{}) *httptest.ResponseRecorder {
@@ -65,11 +69,9 @@ func TestRegisterAndListNodes(t *testing.T) {
 func TestHeartbeatUpdatesStats(t *testing.T) {
 	reg := newTestRegistry()
 
-	// Register first
 	rr := models.RegisterRequest{NodeID: "w1", Address: "host:8081", Region: "IT"}
 	doPost(t, reg.RegisterHandler, "/register", rr)
 
-	// Send heartbeat with stats
 	hb := models.HeartbeatRequest{
 		NodeID:      "w1",
 		CPUUsage:    75.0,
@@ -81,7 +83,6 @@ func TestHeartbeatUpdatesStats(t *testing.T) {
 		t.Fatalf("heartbeat returned %d", resp.Code)
 	}
 
-	// List nodes and verify stats updated
 	listResp := doGet(t, reg.NodesHandler, "/nodes")
 	var raw []json.RawMessage
 	json.NewDecoder(listResp.Body).Decode(&raw)
@@ -111,7 +112,6 @@ func TestDeregisterRemovesNode(t *testing.T) {
 	rr := models.RegisterRequest{NodeID: "w1", Address: "host:8081", Region: "IT"}
 	doPost(t, reg.RegisterHandler, "/register", rr)
 
-	// Deregister
 	req := httptest.NewRequest(http.MethodDelete, "/deregister?id=w1", nil)
 	w := httptest.NewRecorder()
 	reg.DeregisterHandler(w, req)
@@ -119,7 +119,6 @@ func TestDeregisterRemovesNode(t *testing.T) {
 		t.Fatalf("deregister returned %d", w.Code)
 	}
 
-	// Node list should be empty
 	listResp := doGet(t, reg.NodesHandler, "/nodes")
 	var nodes []interface{}
 	json.NewDecoder(listResp.Body).Decode(&nodes)
@@ -149,16 +148,14 @@ func TestMultipleNodesRegistration(t *testing.T) {
 
 func TestNodeTTLExpiry(t *testing.T) {
 	cfg := config.RegistryConfig{
-		NodeTTL:       200 * time.Millisecond, // very short TTL for test
-		CleanupPeriod: 100 * time.Millisecond,
+		NodeTTL:       config.Duration(200 * time.Millisecond),
+		CleanupPeriod: config.Duration(100 * time.Millisecond),
 	}
-	log, _ := zap.NewDevelopment()
-	reg := registry.New(cfg, log)
+	reg := registry.New(cfg, testLog())
 
 	rr := models.RegisterRequest{NodeID: "w1", Address: "host:8081", Region: "IT"}
 	doPost(t, reg.RegisterHandler, "/register", rr)
 
-	// Wait for TTL to expire + cleanup to run
 	time.Sleep(500 * time.Millisecond)
 
 	listResp := doGet(t, reg.NodesHandler, "/nodes")
